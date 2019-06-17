@@ -10,6 +10,7 @@
 #include "sphere.h"
 #include "hitable_list.h"
 #include "camera.h"
+#include "material.h"
 
 #define checkCudaErrors(val) check_cuda( (val), #val, __FILE__, __LINE__ )
 void check_cuda(cudaError_t result, char const *const func, const char *const file, int const line) {
@@ -22,68 +23,67 @@ void check_cuda(cudaError_t result, char const *const func, const char *const fi
     }
 }
 
-__device__
-vec3 random_in_unit_sphere(curandState *local_rand_state) {
-	vec3 p;
-	do {
-		p = 2.0f*vec3(curand_uniform(local_rand_state), curand_uniform(local_rand_state), curand_uniform(local_rand_state)) - vec3(1,1,1);
-	} while (p.squared_length() >= 1.0f);
-	return p;
-}
-
-
 
 __device__ 
 vec3 color(const ray& r, hitable **world, curandState *local_rand_state) {
 	ray cur_ray = r;
-	// printf("color cur_ray.direction: %f, %f, %f \n", cur_ray.direction().r(), cur_ray.direction().g(), cur_ray.direction().b());
-	// printf("color cur_ray.origin: %f, %f, %f \n", cur_ray.origin().r(), cur_ray.origin().g(), cur_ray.origin().b());
-	float cur_attenuation = 1.0f;
+	vec3 cur_attenuation(1.0, 1.0, 1.0);
 	for (int i = 0; i<50; i++){
 		hit_record rec;
 		if ((*world)->hit(cur_ray, 0.001f, FLT_MAX, rec)){
-			vec3 target = rec.p + rec.normal + random_in_unit_sphere(local_rand_state);
-			cur_attenuation *= 0.5f;
-			cur_ray = ray(rec.p, target-rec.p);
-			// if (i == 0){
-			// 	printf("color cur_ray.direction: %f, %f, %f \n", cur_ray.direction().r(), cur_ray.direction().g(), cur_ray.direction().b());
-			// 	printf("color cur_ray.origin: %f, %f, %f \n", cur_ray.origin().r(), cur_ray.origin().g(), cur_ray.origin().b());
-			// }
+			ray scattered;
+			vec3 attenuation;
+			if (rec.mat_ptr->scatter(cur_ray, rec, attenuation, scattered, local_rand_state)) {
+				cur_attenuation *= attenuation;
+				cur_ray = scattered;
+			}
+			else {
+				return vec3(0.0, 0.0, 0.0);
+			}
+
 		}
 		else {
-			// printf(": %f, %f \n", , );
-			// vec3 randVec = random_in_unit_sphere(local_rand_state);
-			// printf("color random_in_unit_sphere: %f, %f, %f \n", randVec.r(), randVec.g(), randVec.b());
-			// printf("color cur_ray.direction: %f, %f, %f \n", cur_ray.direction().r(), cur_ray.direction().g(), cur_ray.direction().b());
-			// printf("color cur_ray.origin: %f, %f, %f \n", cur_ray.origin().r(), cur_ray.origin().g(), cur_ray.origin().b());
 			vec3 unit_direction = unit_vector(cur_ray.direction());
-			// printf("color unit_direction: %f, %f, %f \n", unit_direction.r(), unit_direction.g(), unit_direction.b());
 			float t = 0.5f*(unit_direction.y() + 1.0f);
-			// printf("color t: %f \n", t);
 			vec3 c = (1.0f-t)*vec3(1.0, 1.0, 1.0) + t*vec3(0.5, 0.7, 1.0);
-			// printf("color c: %f, %f, %f \n", c.r(), c.g(), c.b());
 			return cur_attenuation * c;
 		}
 	}
 	return vec3(0.0, 0.0, 0.0); // exceeded recursion
 }
 
-__global__
+__global__ 
 void free_world(hitable **d_list, hitable **d_world, camera **d_camera) {
-	delete *(d_list);
-	delete *(d_list+1);
-	delete *d_world;
-	delete *d_camera;
+    for(int i=0; i < 5; i++) {
+        delete ((sphere *)d_list[i])->mat_ptr;
+        delete d_list[i];
+    }
+    delete *d_world;
+    delete *d_camera;
 }
 
 
 __global__
-void create_world(hitable **d_list, hitable **d_world, camera **d_camera) {
+void create_world(hitable **d_list, hitable **d_world, camera **d_camera, int nx, int ny) {
 	if (threadIdx.x == 0 && blockIdx.x == 0) {
-		*(d_list)   = new sphere(vec3(0, 0, -1), 0.5);
-		*(d_list+1) = new sphere(vec3(0, -100.5, -1), 100);
-		*d_world    = new hitable_list(d_list,2);
-		*d_camera   = new camera();
+		// *(d_list)   = new sphere(vec3(0, 0, -1), 0.5);
+		// *(d_list+1) = new sphere(vec3(0, -100.5, -1), 100);
+		*(d_list+0) = new sphere(vec3(0, 0, -1),      0.5, new lambertian(vec3(0.1, 0.2, 0.5)));
+		*(d_list+1) = new sphere(vec3(0, -100.5, -1), 100, new lambertian(vec3(0.8, 0.8, 0.0)));
+		*(d_list+2) = new sphere(vec3(1, 0, -1),      0.5, new metal(vec3(0.8, 0.6, 0.2), 0.0));
+		*(d_list+3) = new sphere(vec3(-1, 0, -1),     0.5, new dielectric(1.5));
+		*(d_list+4) = new sphere(vec3(-1, 0, -1),    -0.45, new dielectric(1.5));
+		*d_world    = new hitable_list(d_list,5);
+
+		vec3 lookfrom(-1,3,2);
+		vec3 lookat(0,0,-1);
+		float vfov = 30.0;
+		float dist_to_focus = (lookfrom-lookat).length();
+		float aperture = 0.1;
+		*d_camera   = new camera(lookfrom, lookat, 
+								vec3(0, 1, 0), vfov, 
+								float(nx)/float(ny), 
+								aperture, dist_to_focus);
 	}
 }
 
@@ -110,22 +110,18 @@ void render(vec3 *fb, int max_x, int max_y, int ns, camera **cam, hitable **worl
 	for (int s=0; s < ns; s++){
 		float u = float(i + curand_uniform(&local_rand_state)) / float(max_x);
 		float v = float(j + curand_uniform(&local_rand_state)) / float(max_y);
-		// printf("render u, v: %f, %f \n", u, v);
-		ray r = (*cam)->get_ray(u,v);
-		// printf("render r.direction: %f, %f, %f \n", r.direction().r(), r.direction().g(), r.direction().b());
-		// printf("render r.origin: %f, %f, %f \n", r.origin().r(), r.origin().g(), r.origin().b());
+		ray r = (*cam)->get_ray(u,v, &local_rand_state);
 		col += color(r, world, &local_rand_state);
-		// printf("render(in loop): %f, %f, %f \n", col.r(), col.g(), col.b());
 	}
-	// printf("render: %f, %f, %f \n", col.r(), col.g(), col.b());
 	col /= float(ns);
 	fb[pixel_index] = col;
 }
 
 
 int main() {
-	int nx = 1920;
-	int ny = 1080;
+	float scale = 0.5;
+	int nx = int(1920*scale);
+	int ny = int(1080*scale);
 	// int nx = 600;
 	// int ny = 300;
 	int ns = 100;
@@ -145,14 +141,14 @@ int main() {
 
 	// Creating world
 	hitable **d_list;
-	checkCudaErrors(cudaMalloc((void **)& d_list, 2*sizeof(hitable *)));
+	checkCudaErrors(cudaMalloc((void **)& d_list, 5*sizeof(hitable *)));
 	hitable **d_world;
 	checkCudaErrors(cudaMalloc((void **)& d_world, sizeof(hitable *)));
 	// Creating camera
 	camera **d_camera;
 	checkCudaErrors(cudaMalloc((void **)& d_camera, sizeof(camera *)));
 
-	create_world<<<1,1>>>(d_list, d_world, d_camera);
+	create_world<<<1,1>>>(d_list, d_world, d_camera, nx, ny);
 	checkCudaErrors(cudaGetLastError());
 	checkCudaErrors(cudaDeviceSynchronize());
 
