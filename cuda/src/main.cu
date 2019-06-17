@@ -1,8 +1,11 @@
 #include <iostream>
 #include <time.h>
+#include "float.h"
 
 #include "vec3.h"
 #include "ray.h"
+#include "sphere.h"
+#include "hitable_list.h"
 
 #define checkCudaErrors(val) check_cuda( (val), #val, __FILE__, __LINE__ )
 void check_cuda(cudaError_t result, char const *const func, const char *const file, int const line) {
@@ -15,29 +18,49 @@ void check_cuda(cudaError_t result, char const *const func, const char *const fi
     }
 }
 
-__device__
-bool hit_sphere(const vec3& center, float radius, const ray& r) {
-	vec3 oc = r.origin() - center;
-	float a = dot(r.direction(), r.direction());
-	float b = 2.0f * dot(oc, r.direction());
-	float c = dot(oc, oc) - radius*radius;
-	float discriminant = b*b - 4*a*c;
-	return (discriminant > 0);
-}
+// __device__
+// bool hit_sphere(const vec3& center, float radius, const ray& r) {
+// 	vec3 oc = r.origin() - center;
+// 	float a = dot(r.direction(), r.direction());
+// 	float b = 2.0f * dot(oc, r.direction());
+// 	float c = dot(oc, oc) - radius*radius;
+// 	float discriminant = b*b - 4*a*c;
+// 	return (discriminant > 0);
+// }
 
 
 __device__ 
-vec3 color(const ray& r) {
-	if (hit_sphere(vec3(0, 0, -1), 0.5f, r))
-		return vec3(1, 0, 0);
-	vec3 unit_direction = unit_vector(r.direction());
-	float t = 0.5f*(unit_direction.y() + 1.0f);
-	return (1.0f-t)*vec3(1.0, 1.0, 1.0) + t*vec3(0.5, 0.7, 1.0); //t*vec3(0.2, 1.0, 0.2);//t*vec3(0.5, 0.7, 1.0);
+vec3 color(const ray& r, hitable **world) {
+	hit_record rec;
+	if ((*world)->hit(r, 0.0, FLT_MAX, rec)){
+		return 0.5f*vec3(rec.normal.x() + 1.0f, rec.normal.y() + 1.0f, rec.normal.z() + 1.0f);
+	}
+	else {
+		vec3 unit_direction = unit_vector(r.direction());
+		float t = 0.5f*(unit_direction.y() + 1.0f);
+		return (1.0f-t)*vec3(1.0, 1.0, 1.0) + t*vec3(0.5, 0.7, 1.0);
+	}
+}
+
+__global__
+void free_world(hitable **d_list, hitable **d_world) {
+	delete *(d_list);
+	delete *(d_list+1);
+	delete *d_world;
 }
 
 
 __global__
-void render(vec3 *fb, int max_x, int max_y, vec3 lower_left_corner, vec3 horizontal, vec3 vertical, vec3 origin) {
+void create_world(hitable **d_list, hitable **d_world) {
+	if (threadIdx.x == 0 && blockIdx.x == 0) {
+		*(d_list)   = new sphere(vec3(0, 0, -1), 0.5);
+		*(d_list+1) = new sphere(vec3(0, -100.5, -1), 100);
+		*d_world    = new hitable_list(d_list,2);
+	}
+}
+
+__global__
+void render(vec3 *fb, int max_x, int max_y, vec3 lower_left_corner, vec3 horizontal, vec3 vertical, vec3 origin, hitable **world) {
 	int i = threadIdx.x + blockIdx.x * blockDim.x;
 	int j = threadIdx.y + blockIdx.y * blockDim.y;
 	if ((i >= max_x) || (j >= max_y)) return;
@@ -45,7 +68,7 @@ void render(vec3 *fb, int max_x, int max_y, vec3 lower_left_corner, vec3 horizon
 	float u = float(i) / float(max_x);
 	float v = float(j) / float(max_y);
 	ray r(origin, lower_left_corner + u*horizontal + v*vertical);
-	fb[pixel_index] = color(r);
+	fb[pixel_index] = color(r, world);
 }
 
 
@@ -57,7 +80,7 @@ int main() {
 
 	// allocate FB
 	vec3 *fb;
-	checkCudaErrors(cudaMallocManaged((void **)&fb, fb_size));
+	checkCudaErrors(cudaMallocManaged((void **)& fb, fb_size));
 
 	int tx = 8;
 	int ty = 8;
@@ -68,6 +91,16 @@ int main() {
 	vec3 vertical(0.0, 2.0, 0.0);
 	vec3 origin(0.0, 0.0, 0.0);
 
+	// Creating world
+	hitable **d_list;
+	checkCudaErrors(cudaMalloc((void **)& d_list, 2*sizeof(hitable *)));
+	hitable **d_world;
+	checkCudaErrors(cudaMalloc((void **)& d_world, sizeof(hitable *)));
+
+	create_world<<<1,1>>>(d_list, d_world);
+	checkCudaErrors(cudaGetLastError());
+	checkCudaErrors(cudaDeviceSynchronize());
+
 	// Start timing
     clock_t start, stop;
     start = clock();
@@ -75,9 +108,18 @@ int main() {
 	// Render our buffer
 	dim3 blocks(nx/tx+1, ny/ty+1);
 	dim3 threads(tx, ty);
-	render<<<blocks, threads>>>(fb, nx, ny, lower_left_corner, horizontal, vertical, origin);
+
+	render<<<blocks, threads>>>(fb, nx, ny, 
+								lower_left_corner, 
+								horizontal, 
+								vertical, 
+								origin, 
+								d_world);
+
 	checkCudaErrors(cudaGetLastError());
 	checkCudaErrors(cudaDeviceSynchronize());
+
+
 
 	// Stop timing and print out result
     stop = clock();
@@ -98,5 +140,11 @@ int main() {
 			std::cout << ir << " " << ig << " " << ib << "\n";
 		}
 	}
+	// Free memory
+	checkCudaErrors(cudaDeviceSynchronize());
+	free_world<<<1, 1>>>(d_list, d_world);
+	checkCudaErrors(cudaGetLastError());
+	checkCudaErrors(cudaFree(d_list));
+	checkCudaErrors(cudaFree(d_world));
 	checkCudaErrors(cudaFree(fb));
 }
