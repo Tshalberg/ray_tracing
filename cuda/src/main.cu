@@ -120,7 +120,8 @@ void create_world(hitable **d_list, hitable **d_world, camera **d_camera, int nx
 				vec3 center(a+0.9*RNG, 0.2, b+0.9*RNG);
 				if ((center-vec3(4,0.2,0)).length() > 0.9) {
 					if (choose_mat < 0.8) { // diffuse (lambertian)
-						d_list[i++] = new sphere(center, 0.2, new lambertian(vec3(RNG*RNG, RNG*RNG, RNG*RNG)));
+						// d_list[i++] = new sphere(center, 0.2, new lambertian(vec3(RNG*RNG, RNG*RNG, RNG*RNG)));
+						d_list[i++] = new sphere(center, 0.2, new lambertian(vec3(255/255., 192/255., 203/255.)));
 					}
 					else if (choose_mat < 0.95) { //metal
 						d_list[i++] = new sphere(center, 0.2, new metal(vec3(0.5*(1 + RNG), 0.5*(1 + RNG), 0.5*(1 + RNG)), 0.5*RNG));
